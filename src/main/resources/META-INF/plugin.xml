@@ -1,0 +1,135 @@
+<!-- Plugin Configuration File -->
+<idea-plugin>
+    <id>com.github.soulduse.intellij.opencode</id>
+    <name>OpenCode</name>
+    <vendor email="corp@infinityapps.info" url="https://github.com/soulduse/intellij-opencode-plugin">
+        soulduse
+    </vendor>
+
+    <description><![CDATA[
+        <h2>OpenCode - The Open Source AI Coding Agent for JetBrains IDEs</h2>
+        <p>
+            OpenCode integration for IntelliJ IDEA, PyCharm, WebStorm, and other JetBrains IDEs.
+            Use the power of AI to assist with your coding tasks directly in your IDE.
+        </p>
+        
+        <h3>Features</h3>
+        <ul>
+            <li><b>Quick Launch</b>: Use Cmd+Esc (Mac) or Ctrl+Esc (Windows/Linux) to open OpenCode</li>
+            <li><b>Context Awareness</b>: Automatically share your current selection or file with OpenCode</li>
+            <li><b>File References</b>: Insert file references with line numbers using Cmd+Option+K</li>
+            <li><b>Diff Viewing</b>: View code changes directly in the IDE diff viewer</li>
+            <li><b>Multiple Sessions</b>: Manage multiple conversations</li>
+        </ul>
+        
+        <h3>Requirements</h3>
+        <ul>
+            <li>OpenCode CLI must be installed (<a href="https://opencode.ai">opencode.ai</a>)</li>
+            <li>IntelliJ IDEA 2023.3 or later</li>
+        </ul>
+        
+        <h3>Getting Started</h3>
+        <ol>
+            <li>Install OpenCode CLI: <code>npm install -g opencode-ai</code></li>
+            <li>Open the OpenCode panel using Cmd+Esc (Mac) or Ctrl+Esc (Windows/Linux)</li>
+            <li>Start chatting with OpenCode!</li>
+        </ol>
+    ]]></description>
+
+    <change-notes><![CDATA[
+        <h3>0.1.0</h3>
+        <ul>
+            <li>Initial release</li>
+            <li>Basic OpenCode integration</li>
+            <li>Tool window with chat interface</li>
+            <li>Session management</li>
+            <li>File reference insertion</li>
+        </ul>
+    ]]></change-notes>
+
+    <!-- Product and platform compatibility -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends optional="true" config-file="optional/terminal.xml">org.jetbrains.plugins.terminal</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Tool Window -->
+        <toolWindow id="OpenCode"
+                    anchor="right"
+                    icon="/icons/opencode.svg"
+                    factoryClass="com.github.soulduse.intellij.opencode.toolwindow.OpenCodeToolWindowFactory"/>
+
+        <!-- Application-level Settings -->
+        <applicationConfigurable
+                parentId="tools"
+                instance="com.github.soulduse.intellij.opencode.settings.OpenCodeSettingsConfigurable"
+                id="com.github.soulduse.intellij.opencode.settings"
+                displayName="OpenCode"
+                nonDefaultProject="true"/>
+
+        <applicationService
+                serviceImplementation="com.github.soulduse.intellij.opencode.settings.OpenCodeSettingsState"/>
+
+        <!-- Project-level Service -->
+        <projectService
+                serviceImplementation="com.github.soulduse.intellij.opencode.services.OpenCodeService"/>
+
+        <!-- Notification Group -->
+        <notificationGroup id="OpenCode Notifications"
+                           displayType="BALLOON"
+                           toolWindowId="OpenCode"/>
+    </extensions>
+
+    <actions>
+        <!-- Focus OpenCode Action -->
+        <action id="OpenCode.Focus"
+                class="com.github.soulduse.intellij.opencode.actions.FocusOpenCodeAction"
+                text="Focus OpenCode"
+                description="Open or focus the OpenCode panel"
+                icon="/icons/opencode.svg">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl ESCAPE"/>
+            <keyboard-shortcut keymap="Mac OS X" first-keystroke="meta ESCAPE"/>
+            <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta ESCAPE"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+
+        <!-- New Session Action -->
+        <action id="OpenCode.NewSession"
+                class="com.github.soulduse.intellij.opencode.actions.NewSessionAction"
+                text="New OpenCode Session"
+                description="Start a new OpenCode conversation"
+                icon="/icons/opencode.svg">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl shift ESCAPE"/>
+            <keyboard-shortcut keymap="Mac OS X" first-keystroke="meta shift ESCAPE"/>
+            <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta shift ESCAPE"/>
+        </action>
+
+        <!-- Insert File Reference Action -->
+        <action id="OpenCode.InsertFileReference"
+                class="com.github.soulduse.intellij.opencode.actions.InsertFileReferenceAction"
+                text="Insert File Reference to OpenCode"
+                description="Insert current file reference with line numbers to OpenCode">
+            <keyboard-shortcut keymap="$default" first-keystroke="alt ctrl K"/>
+            <keyboard-shortcut keymap="Mac OS X" first-keystroke="meta alt K"/>
+            <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt K"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+
+        <!-- Action Group -->
+        <group id="OpenCode.ActionGroup"
+               text="OpenCode"
+               description="OpenCode actions"
+               popup="true"
+               icon="/icons/opencode.svg">
+            <reference ref="OpenCode.Focus"/>
+            <reference ref="OpenCode.NewSession"/>
+            <separator/>
+            <reference ref="OpenCode.InsertFileReference"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </group>
+    </actions>
+
+    <projectListeners>
+        <listener class="com.github.soulduse.intellij.opencode.listeners.ProjectOpenCloseListener"
+                  topic="com.intellij.openapi.project.ProjectManagerListener"/>
+    </projectListeners>
+</idea-plugin>

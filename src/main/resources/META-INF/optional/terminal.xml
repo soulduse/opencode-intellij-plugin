@@ -1,0 +1,4 @@
+<idea-plugin>
+    <!-- Terminal integration extensions -->
+    <!-- This file is loaded only when the Terminal plugin is available -->
+</idea-plugin>
