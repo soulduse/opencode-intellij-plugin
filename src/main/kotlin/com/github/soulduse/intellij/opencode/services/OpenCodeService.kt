@@ -5,6 +5,7 @@ import com.github.soulduse.intellij.opencode.model.HealthResponse
 import com.github.soulduse.intellij.opencode.model.MessagePart
 import com.github.soulduse.intellij.opencode.model.MessageResponse
 import com.github.soulduse.intellij.opencode.model.Session
+import com.github.soulduse.intellij.opencode.model.StreamEvent
 import com.github.soulduse.intellij.opencode.settings.OpenCodeSettingsState
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
@@ -13,6 +14,7 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.Flow
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
@@ -24,6 +26,7 @@ class OpenCodeService(private val project: Project) : Disposable {
     
     private var serverProcess: Process? = null
     private var client: OpenCodeClient? = null
+    private var sseClient: SSEClient? = null
     private var currentSession: Session? = null
     
     val isServerRunning: Boolean
@@ -37,6 +40,14 @@ class OpenCodeService(private val project: Project) : Disposable {
             client = OpenCodeClient()
         }
         return client!!
+    }
+    
+    fun getSSEClient(): SSEClient {
+        if (sseClient == null) {
+            val settings = OpenCodeSettingsState.getInstance()
+            sseClient = SSEClient("http://127.0.0.1:${settings.serverPort}")
+        }
+        return sseClient!!
     }
     
     fun startServer(): Boolean {
@@ -110,6 +121,8 @@ class OpenCodeService(private val project: Project) : Disposable {
         
         client?.close()
         client = null
+        sseClient?.close()
+        sseClient = null
     }
     
     suspend fun checkHealth(): Result<HealthResponse> {
@@ -160,6 +173,24 @@ class OpenCodeService(private val project: Project) : Disposable {
     suspend fun abortCurrentSession(): Result<Boolean> {
         val session = currentSession ?: return Result.success(false)
         return getClient().abortSession(session.id)
+    }
+    
+    suspend fun abort(): Result<Boolean> = abortCurrentSession()
+    
+    /**
+     * Stream a message and receive real-time updates.
+     */
+    fun streamMessage(text: String): Flow<StreamEvent>? {
+        val session = currentSession ?: return null
+        return getSSEClient().streamPrompt(session.id, text)
+    }
+    
+    /**
+     * Subscribe to events for the current session.
+     */
+    fun subscribeToEvents(): Flow<StreamEvent>? {
+        val session = currentSession ?: return null
+        return getSSEClient().subscribeToEvents(session.id)
     }
     
     private fun showNotification(content: String, type: NotificationType) {

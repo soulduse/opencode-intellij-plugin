@@ -3,7 +3,11 @@ package com.github.soulduse.intellij.opencode.toolwindow
 import com.github.soulduse.intellij.opencode.OpenCodeBundle
 import com.github.soulduse.intellij.opencode.model.MessageResponse
 import com.github.soulduse.intellij.opencode.model.Session
+import com.github.soulduse.intellij.opencode.model.StreamEvent
 import com.github.soulduse.intellij.opencode.services.OpenCodeService
+import com.github.soulduse.intellij.opencode.services.RetryUtils
+import com.github.soulduse.intellij.opencode.ui.MarkdownRenderer
+import kotlinx.coroutines.flow.collect
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
@@ -23,17 +27,23 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
     
     private val service = OpenCodeService.getInstance(project)
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val markdownRenderer = MarkdownRenderer()
     
     private val mainPanel = JPanel(BorderLayout())
     private val chatPanel = JPanel()
     private lateinit var chatScrollPane: JBScrollPane
     private val inputArea = JBTextArea(3, 40)
     private val sendButton = JButton(OpenCodeBundle.message("toolwindow.button.send"))
+    private val abortButton = JButton(OpenCodeBundle.message("toolwindow.button.abort"))
     private val sessionComboBox = ComboBox<SessionItem>()
     private val statusLabel = JBLabel(OpenCodeBundle.message("status.disconnected"))
     private val modeToggle = JToggleButton(OpenCodeBundle.message("toolwindow.button.build"))
+    private val loadingPanel = JPanel(FlowLayout(FlowLayout.LEFT))
     
     private var isLoading = false
+    private var currentJob: Job? = null
+    private var streamingMessagePanel: StreamingMessagePanel? = null
+    private var useStreaming = true // Enable streaming by default
     
     val content: JComponent
         get() = mainPanel
@@ -82,6 +92,31 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
         // Show empty state
         showEmptyState()
         
+        // Loading indicator panel
+        loadingPanel.apply {
+            isVisible = false
+            background = JBColor.background()
+            border = JBUI.Borders.empty(4, 8)
+            
+            add(JBLabel("Thinking...").apply {
+                foreground = JBColor.GRAY
+            })
+            
+            // Simple animated dots
+            val dotsLabel = JBLabel("")
+            add(dotsLabel)
+            
+            // Animation timer
+            val dots = arrayOf(".", "..", "...", "")
+            var dotIndex = 0
+            Timer(400) {
+                if (isVisible) {
+                    dotsLabel.text = dots[dotIndex % dots.size]
+                    dotIndex++
+                }
+            }.start()
+        }
+        
         // Input area
         inputArea.apply {
             border = JBUI.Borders.empty(8)
@@ -96,13 +131,24 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
             preferredSize = Dimension(0, 80)
         }
         
+        // Abort button styling
+        abortButton.apply {
+            isVisible = false
+            background = JBColor(Color(220, 53, 69), Color(180, 40, 50))
+            foreground = JBColor.WHITE
+            isFocusPainted = false
+        }
+        
         // Bottom panel with input and buttons
         val bottomPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.emptyTop(8)
+            
+            add(loadingPanel, BorderLayout.NORTH)
             add(inputScrollPane, BorderLayout.CENTER)
             
             val buttonPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 4)).apply {
                 add(modeToggle)
+                add(abortButton)
                 add(sendButton)
             }
             add(buttonPanel, BorderLayout.SOUTH)
@@ -118,12 +164,18 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
         // Send button
         sendButton.addActionListener { sendMessage() }
         
+        // Abort button
+        abortButton.addActionListener { abortCurrentRequest() }
+        
         // Enter to send (Shift+Enter for new line)
         inputArea.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
                 if (e.keyCode == KeyEvent.VK_ENTER && !e.isShiftDown) {
                     e.consume()
                     sendMessage()
+                } else if (e.keyCode == KeyEvent.VK_ESCAPE && isLoading) {
+                    e.consume()
+                    abortCurrentRequest()
                 }
             }
         })
@@ -156,7 +208,7 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
     }
     
     private fun createSettingsButton(): JButton {
-        return JButton("⚙").apply {
+        return JButton("\u2699").apply {
             toolTipText = OpenCodeBundle.message("toolwindow.button.settings")
             preferredSize = Dimension(30, 25)
             isBorderPainted = false
@@ -169,7 +221,7 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
     }
     
     private fun createRefreshButton(): JButton {
-        return JButton("↻").apply {
+        return JButton("\u21BB").apply {
             toolTipText = OpenCodeBundle.message("toolwindow.button.refresh")
             preferredSize = Dimension(30, 25)
             isBorderPainted = false
@@ -195,19 +247,128 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
         chatPanel.repaint()
     }
     
+    private fun setLoadingState(loading: Boolean) {
+        isLoading = loading
+        sendButton.isEnabled = !loading
+        sendButton.text = if (loading) "..." else OpenCodeBundle.message("toolwindow.button.send")
+        abortButton.isVisible = loading
+        loadingPanel.isVisible = loading
+        inputArea.isEnabled = !loading
+    }
+    
+    private fun abortCurrentRequest() {
+        currentJob?.cancel()
+        
+        scope.launch {
+            service.abort()
+            ApplicationManager.getApplication().invokeLater {
+                setLoadingState(false)
+                addMessageToChat("System", "Request aborted.", false, isSystem = true)
+            }
+        }
+    }
+    
     private fun sendMessage() {
         val text = inputArea.text.trim()
         if (text.isEmpty() || isLoading) return
         
         inputArea.text = ""
-        isLoading = true
-        sendButton.isEnabled = false
-        sendButton.text = "..."
+        setLoadingState(true)
         
         // Add user message to UI
         addMessageToChat("You", text, true)
         
-        scope.launch {
+        // Try streaming first, fallback to regular request
+        val streamFlow = if (useStreaming) service.streamMessage(text) else null
+        
+        if (streamFlow != null) {
+            sendMessageWithStreaming(text, streamFlow)
+        } else {
+            sendMessageWithoutStreaming(text)
+        }
+    }
+    
+    private fun sendMessageWithStreaming(text: String, streamFlow: kotlinx.coroutines.flow.Flow<StreamEvent>) {
+        // Create streaming message panel
+        ApplicationManager.getApplication().invokeLater {
+            removeEmptyStateIfNeeded()
+            streamingMessagePanel = StreamingMessagePanel()
+            chatPanel.add(streamingMessagePanel)
+            chatPanel.add(Box.createVerticalStrut(8))
+            chatPanel.revalidate()
+            chatPanel.repaint()
+            scrollToBottom()
+        }
+        
+        currentJob = scope.launch {
+            val textBuffer = StringBuilder()
+            
+            try {
+                streamFlow.collect { event ->
+                    when (event) {
+                        is StreamEvent.TextDelta -> {
+                            textBuffer.append(event.text)
+                            ApplicationManager.getApplication().invokeLater {
+                                streamingMessagePanel?.updateText(textBuffer.toString())
+                                scrollToBottom()
+                            }
+                        }
+                        is StreamEvent.ToolUse -> {
+                            ApplicationManager.getApplication().invokeLater {
+                                streamingMessagePanel?.showToolUse(event.name)
+                            }
+                        }
+                        is StreamEvent.ToolResult -> {
+                            ApplicationManager.getApplication().invokeLater {
+                                streamingMessagePanel?.hideToolUse()
+                            }
+                        }
+                        is StreamEvent.MessageComplete -> {
+                            ApplicationManager.getApplication().invokeLater {
+                                finalizeStreamingMessage(textBuffer.toString())
+                            }
+                        }
+                        is StreamEvent.Error -> {
+                            ApplicationManager.getApplication().invokeLater {
+                                removeStreamingPanel()
+                                addMessageToChat("Error", event.message, false, isError = true)
+                            }
+                        }
+                        is StreamEvent.Heartbeat -> {
+                            // Ignore heartbeats
+                        }
+                        is StreamEvent.MessageStart -> {
+                            // Message started
+                        }
+                    }
+                }
+                
+                // If stream completed without MessageComplete, finalize anyway
+                if (textBuffer.isNotEmpty()) {
+                    ApplicationManager.getApplication().invokeLater {
+                        finalizeStreamingMessage(textBuffer.toString())
+                    }
+                }
+            } catch (e: CancellationException) {
+                ApplicationManager.getApplication().invokeLater {
+                    removeStreamingPanel()
+                }
+            } catch (e: Exception) {
+                // Streaming failed, fallback to non-streaming
+                ApplicationManager.getApplication().invokeLater {
+                    removeStreamingPanel()
+                }
+                sendMessageWithoutStreaming(text)
+            } finally {
+                ApplicationManager.getApplication().invokeLater {
+                    setLoadingState(false)
+                }
+            }
+        }
+    }
+    
+    private fun sendMessageWithoutStreaming(text: String) {
+        currentJob = scope.launch {
             try {
                 val result = service.sendMessage(text)
                 result.onSuccess { response ->
@@ -220,38 +381,74 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
                         addMessageToChat("OpenCode", assistantText, false)
                     }
                 }.onFailure { error ->
+                    val friendlyMessage = RetryUtils.getUserFriendlyMessage(error)
                     ApplicationManager.getApplication().invokeLater {
-                        addMessageToChat("Error", error.message ?: "Unknown error", false, isError = true)
+                        addMessageToChat("Error", friendlyMessage, false, isError = true)
                     }
                 }
+            } catch (e: CancellationException) {
+                // Request was cancelled, handled in abortCurrentRequest
             } finally {
                 ApplicationManager.getApplication().invokeLater {
-                    isLoading = false
-                    sendButton.isEnabled = true
-                    sendButton.text = OpenCodeBundle.message("toolwindow.button.send")
+                    setLoadingState(false)
                 }
             }
         }
     }
     
-    private fun addMessageToChat(sender: String, text: String, isUser: Boolean, isError: Boolean = false) {
-        // Remove empty state if present
+    private fun finalizeStreamingMessage(text: String) {
+        removeStreamingPanel()
+        if (text.isNotBlank()) {
+            addMessageToChat("OpenCode", text, false)
+        }
+    }
+    
+    private fun removeStreamingPanel() {
+        streamingMessagePanel?.let { panel ->
+            val index = chatPanel.components.indexOf(panel)
+            if (index >= 0) {
+                chatPanel.remove(index)
+                // Also remove the vertical strut after it
+                if (index < chatPanel.componentCount) {
+                    chatPanel.remove(index)
+                }
+            }
+        }
+        streamingMessagePanel = null
+        chatPanel.revalidate()
+        chatPanel.repaint()
+    }
+    
+    private fun removeEmptyStateIfNeeded() {
         if (chatPanel.componentCount == 2 && chatPanel.getComponent(0) is Box.Filler) {
             chatPanel.removeAll()
         }
+    }
+    
+    private fun scrollToBottom() {
+        SwingUtilities.invokeLater {
+            val scrollBar = chatScrollPane.verticalScrollBar
+            scrollBar.value = scrollBar.maximum
+        }
+    }
+    
+    private fun addMessageToChat(
+        sender: String, 
+        text: String, 
+        isUser: Boolean, 
+        isError: Boolean = false,
+        isSystem: Boolean = false
+    ) {
+        removeEmptyStateIfNeeded()
         
-        val messagePanel = MessagePanel(sender, text, isUser, isError)
+        val messagePanel = MessagePanel(sender, text, isUser, isError, isSystem)
         chatPanel.add(messagePanel)
         chatPanel.add(Box.createVerticalStrut(8))
         
         chatPanel.revalidate()
         chatPanel.repaint()
         
-        // Scroll to bottom
-        SwingUtilities.invokeLater {
-            val scrollBar = chatScrollPane.verticalScrollBar
-            scrollBar.value = scrollBar.maximum
-        }
+        scrollToBottom()
     }
     
     private fun checkConnection() {
@@ -288,7 +485,7 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
         scope.launch {
             val result = service.createSession()
             ApplicationManager.getApplication().invokeLater {
-                result.onSuccess { session ->
+                result.onSuccess { _ ->
                     refreshSessions()
                     chatPanel.removeAll()
                     showEmptyState()
@@ -341,6 +538,7 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
     }
     
     override fun dispose() {
+        currentJob?.cancel()
         scope.cancel()
     }
     
@@ -349,43 +547,121 @@ class OpenCodeToolWindow(private val project: Project) : Disposable {
         override fun toString(): String = displayName
     }
     
-    // Message panel component
+    // Message panel component with markdown rendering
     private inner class MessagePanel(
         sender: String,
         text: String,
         isUser: Boolean,
-        isError: Boolean = false
+        isError: Boolean = false,
+        isSystem: Boolean = false
     ) : JPanel() {
         
         init {
             layout = BorderLayout()
             border = JBUI.Borders.empty(8)
-            background = if (isUser) {
-                JBColor(Color(240, 240, 245), Color(50, 50, 55))
-            } else if (isError) {
-                JBColor(Color(255, 240, 240), Color(80, 40, 40))
-            } else {
-                JBColor.background()
+            background = when {
+                isUser -> JBColor(Color(240, 240, 245), Color(50, 50, 55))
+                isError -> JBColor(Color(255, 240, 240), Color(80, 40, 40))
+                isSystem -> JBColor(Color(255, 250, 230), Color(60, 55, 40))
+                else -> JBColor.background()
             }
+            alignmentX = Component.LEFT_ALIGNMENT
             
             val headerLabel = JBLabel(sender).apply {
                 font = font.deriveFont(Font.BOLD)
-                foreground = if (isError) JBColor.RED else if (isUser) JBColor.BLUE else JBColor.foreground()
-            }
-            
-            val textArea = JBTextArea(text).apply {
-                isEditable = false
-                lineWrap = true
-                wrapStyleWord = true
-                background = this@MessagePanel.background
-                border = JBUI.Borders.emptyTop(4)
-                font = Font(Font.MONOSPACED, Font.PLAIN, 13)
+                foreground = when {
+                    isError -> JBColor.RED
+                    isSystem -> JBColor(Color(180, 140, 0), Color(200, 160, 50))
+                    isUser -> JBColor.BLUE
+                    else -> JBColor.foreground()
+                }
             }
             
             add(headerLabel, BorderLayout.NORTH)
-            add(textArea, BorderLayout.CENTER)
+            
+            // Use markdown rendering for non-user messages
+            val contentComponent = if (!isUser && !isError && !isSystem) {
+                markdownRenderer.render(text)
+            } else {
+                JBTextArea(text).apply {
+                    isEditable = false
+                    lineWrap = true
+                    wrapStyleWord = true
+                    background = this@MessagePanel.background
+                    border = JBUI.Borders.emptyTop(4)
+                    font = Font(Font.MONOSPACED, Font.PLAIN, 13)
+                }
+            }
+            
+            add(contentComponent, BorderLayout.CENTER)
             
             maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+        }
+    }
+    
+    // Streaming message panel for real-time updates
+    private inner class StreamingMessagePanel : JPanel() {
+        private val textArea = JBTextArea()
+        private val toolLabel = JBLabel()
+        private val headerLabel = JBLabel("OpenCode")
+        
+        init {
+            layout = BorderLayout()
+            border = JBUI.Borders.empty(8)
+            background = JBColor.background()
+            alignmentX = Component.LEFT_ALIGNMENT
+            
+            headerLabel.apply {
+                font = font.deriveFont(Font.BOLD)
+                foreground = JBColor.foreground()
+            }
+            
+            textArea.apply {
+                isEditable = false
+                lineWrap = true
+                wrapStyleWord = true
+                background = this@StreamingMessagePanel.background
+                border = JBUI.Borders.emptyTop(4)
+                font = Font(Font.MONOSPACED, Font.PLAIN, 13)
+                text = ""
+            }
+            
+            toolLabel.apply {
+                isVisible = false
+                foreground = JBColor.GRAY
+                border = JBUI.Borders.emptyTop(4)
+            }
+            
+            val contentPanel = JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                isOpaque = false
+                add(textArea)
+                add(toolLabel)
+            }
+            
+            add(headerLabel, BorderLayout.NORTH)
+            add(contentPanel, BorderLayout.CENTER)
+            
+            maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+        }
+        
+        fun updateText(text: String) {
+            textArea.text = text
+            revalidate()
+            repaint()
+        }
+        
+        fun showToolUse(toolName: String) {
+            toolLabel.text = "\u2699 Using: $toolName..."
+            toolLabel.isVisible = true
+            revalidate()
+            repaint()
+        }
+        
+        fun hideToolUse() {
+            toolLabel.isVisible = false
+            revalidate()
+            repaint()
         }
     }
 }

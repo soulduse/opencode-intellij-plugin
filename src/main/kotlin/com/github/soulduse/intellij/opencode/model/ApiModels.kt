@@ -107,6 +107,23 @@ data class ServerEvent(
     val properties: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap()
 )
 
+// SSE Event types for streaming responses
+sealed class StreamEvent {
+    data class MessageStart(val messageId: String) : StreamEvent()
+    data class TextDelta(val text: String) : StreamEvent()
+    data class ToolUse(val name: String, val input: String) : StreamEvent()
+    data class ToolResult(val name: String, val result: String) : StreamEvent()
+    data class MessageComplete(val messageId: String) : StreamEvent()
+    data class Error(val message: String) : StreamEvent()
+    object Heartbeat : StreamEvent()
+}
+
+@Serializable
+data class SSEEvent(
+    val type: String,
+    val data: kotlinx.serialization.json.JsonElement? = null
+)
+
 @Serializable
 data class ErrorResponse(
     val error: String,

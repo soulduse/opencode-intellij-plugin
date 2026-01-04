@@ -41,18 +41,34 @@ class OpenCodeClient(
     
     // Health check
     suspend fun health(): Result<HealthResponse> = runCatching {
-        client.get("$baseUrl/global/health").body()
+        RetryUtils.withRetry(
+            times = 2,
+            initialDelayMs = 500,
+            shouldRetry = RetryUtils::isRetryable
+        ) {
+            client.get("$baseUrl/global/health").body()
+        }
     }
     
     // Session management
     suspend fun createSession(title: String? = null): Result<Session> = runCatching {
-        client.post("$baseUrl/session") {
-            setBody(CreateSessionRequest(title = title))
-        }.body()
+        RetryUtils.withRetry(
+            times = 3,
+            shouldRetry = RetryUtils::isRetryable
+        ) {
+            client.post("$baseUrl/session") {
+                setBody(CreateSessionRequest(title = title))
+            }.body()
+        }
     }
     
     suspend fun listSessions(): Result<List<Session>> = runCatching {
-        client.get("$baseUrl/session").body()
+        RetryUtils.withRetry(
+            times = 2,
+            shouldRetry = RetryUtils::isRetryable
+        ) {
+            client.get("$baseUrl/session").body()
+        }
     }
     
     suspend fun getSession(id: String): Result<Session> = runCatching {
@@ -66,9 +82,14 @@ class OpenCodeClient(
     
     // Messages
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageResponse>> = runCatching {
-        client.get("$baseUrl/session/$sessionId/message") {
-            limit?.let { parameter("limit", it) }
-        }.body()
+        RetryUtils.withRetry(
+            times = 2,
+            shouldRetry = RetryUtils::isRetryable
+        ) {
+            client.get("$baseUrl/session/$sessionId/message") {
+                limit?.let { parameter("limit", it) }
+            }.body()
+        }
     }
     
     suspend fun sendPrompt(
@@ -77,6 +98,7 @@ class OpenCodeClient(
         model: ModelInfo? = null,
         agent: String? = null
     ): Result<MessageResponse> = runCatching {
+        // Don't retry message sending as it could cause duplicates
         val parts = listOf(MessagePart(type = "text", text = text))
         client.post("$baseUrl/session/$sessionId/message") {
             setBody(PromptRequest(
